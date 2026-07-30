@@ -1,7 +1,6 @@
 import type { TimestampsAndDeletedAt } from '../db.js';
-import type { FunctionCapabilities } from '../functions/capabilities.js';
-import type { FunctionLimits, FunctionTriggerDefinition, Requires } from '../functions/config.js';
 import type { FunctionSource } from '../syncConfigs/db.js';
+import type { FunctionCapabilities, FunctionLimits, FunctionRequires, FunctionTriggerDefinition } from './config.js';
 import type { JSONSchema7 } from 'json-schema';
 import type { JsonValue } from 'type-fest';
 
@@ -24,7 +23,7 @@ export interface DBFunctionConfigVersion extends TimestampsAndDeletedAt {
     version: string;
     source: FunctionSource;
     trigger: FunctionTriggerDefinition;
-    requires: Requires;
+    requires: FunctionRequires;
     capabilities: FunctionCapabilities;
     limits: FunctionLimits;
     input_schema_ref: string | null;
