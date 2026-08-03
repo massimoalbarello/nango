@@ -316,7 +316,7 @@ export class OrchestratorClient {
         const { args, ...rest } = props;
         return {
             ...rest,
-            retry: { count: 0, max: 0 },
+            retry: { count: props.retry?.count || 0, max: props.retry?.max || 0 },
             timeoutSettingsInSecs: {
                 createdToStarted: 5 * 60,
                 startedToCompleted: 60 * 60,

@@ -25,6 +25,7 @@ export { default as shopifyWebhookRouting } from './shopify-webhook-routing.js';
 export { default as pagerdutyWebhookRouting } from './pagerduty-webhook-routing.js';
 export { default as autotaskWebhookRouting } from './autotask-webhook-routing.js';
 export { default as connectwisePsaWebhookRouting } from './connectwise-psa-webhook-routing.js';
+export { default as contextUseAgentSyncWebhookRouting } from './context-use-agent-sync-webhook-routing.js';
 export { default as shipstationWebhookRouting } from './shipstation-webhook-routing.js';
 export { default as googleCalendarWebhookRouting } from './google-calendar-webhook-routing.js';
 export { default as googleDriveWebhookRouting } from './google-drive-webhook-routing.js';

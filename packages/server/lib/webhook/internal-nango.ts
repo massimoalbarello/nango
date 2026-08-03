@@ -188,7 +188,7 @@ export class InternalNango {
         // use webhookTypeValue if provided (direct value from headers), otherwise extract from body
         const type = webhookTypeValue || (webhookType ? get(body, webhookType) : undefined);
 
-        const publisher = envs.WEBHOOK_INGRESS_USE_DISPATCH_QUEUE ? dispatchQueuePublisher : null;
+        const publisher = envs.WEBHOOK_INGRESS_USE_DISPATCH_QUEUE && this.integration.provider !== 'context-use-agent-sync' ? dispatchQueuePublisher : null;
 
         if (publisher) {
             await this.dispatchViaQueue({
@@ -285,7 +285,9 @@ export class InternalNango {
                     webhookName: webhook,
                     syncConfig,
                     input: body,
-                    maxConcurrency: envs.WEBHOOK_ENVIRONMENT_MAX_CONCURRENCY,
+                    maxConcurrency: this.integration.provider === 'context-use-agent-sync' ? 1 : envs.WEBHOOK_ENVIRONMENT_MAX_CONCURRENCY,
+                    retryMax: this.integration.provider === 'context-use-agent-sync' ? 3 : 0,
+                    groupByConnection: this.integration.provider === 'context-use-agent-sync',
                     logCtx
                 });
 
