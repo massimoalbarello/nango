@@ -235,6 +235,8 @@ export class Orchestrator {
         syncConfig,
         input,
         maxConcurrency,
+        retryMax = 0,
+        groupByConnection = false,
         logCtx
     }: {
         connection: ConnectionJobs;
@@ -242,6 +244,8 @@ export class Orchestrator {
         syncConfig: DBSyncConfig;
         input: object;
         maxConcurrency: number;
+        retryMax?: number;
+        groupByConnection?: boolean;
         logCtx: LogContext;
     }): Promise<Result<T, NangoError>> {
         const activeSpan = tracer.scope().active();
@@ -267,7 +271,9 @@ export class Orchestrator {
                 const error = new NangoError('webhook_failure', { error: errorMsg });
                 throw error;
             }
-            const groupKey = `webhook:environment:${connection.environment_id}`;
+            const groupKey = groupByConnection
+                ? `webhook:environment:${connection.environment_id}:connection:${connection.id}`
+                : `webhook:environment:${connection.environment_id}`;
             const executionId = `${groupKey}:connection:${connection.id}:webhook:${webhookName}:at:${new Date().toISOString()}:${uuid()}`;
             const args = {
                 webhookName,
@@ -284,6 +290,7 @@ export class Orchestrator {
             const webhookResult = await this.client.executeWebhook({
                 name: executionId,
                 group: { key: groupKey, maxConcurrency },
+                retry: { count: 0, max: retryMax },
                 args
             });
             const res = webhookResult.mapError((err) => {
