@@ -1,0 +1,33 @@
+---
+title: Authenticated Webhook
+sidebarTitle: Authenticated Webhook
+---
+
+## Overview
+
+Authenticated Webhook is a generic provider for trusted clients that push events into connection-scoped Nango webhook functions.
+
+The client sends a bearer token and a JSON body containing `type` and `connectionId`. Nango verifies the token against the SHA-256 verifier in the connection's `authenticated_webhook` metadata before scheduling any function work.
+
+This provider is intended for programmatically managed internal integrations. It does not require third-party credentials, and connection-scoped bearer credentials should be generated, rotated, and revoked by the application managing the connection.
+
+## Connection metadata
+
+Store only the verifier in connection metadata; do not store the bearer token itself.
+
+```json
+{
+    "authenticated_webhook": {
+        "state": "active",
+        "token_sha256": "<lowercase SHA-256 hex>"
+    }
+}
+```
+
+Set `state` to `revoked` to reject a valid credential. Rotating a credential means replacing `token_sha256` and securely delivering the new token to the client.
+
+## Requests
+
+Send `Authorization: Bearer <token>` with a JSON body no larger than 4 MiB. The `type` and `connectionId` strings must not have leading or trailing whitespace. All other payload validation belongs to the deployed webhook function.
+
+Use `nango.authenticated-webhook.status` with only `type` and `connectionId` for an authenticated status probe. Other event types return `202` only after at least one matching function has been scheduled. A `503` response is safe to retry.

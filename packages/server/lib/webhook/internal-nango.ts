@@ -28,6 +28,12 @@ import type {
 const LARGE_FANOUT_THRESHOLD = 10;
 const LOG_CONTEXT_CREATE_CONCURRENCY = 25;
 
+interface WebhookExecutionOptions {
+    maxConcurrency: number;
+    retryMax: number;
+    groupByConnection: boolean;
+}
+
 interface MatchedExecution {
     syncConfig: DBSyncConfig;
     webhook: string;
@@ -121,7 +127,8 @@ export class InternalNango {
         webhookTypeValue,
         connectionIdentifier,
         connectionIdentifierValue,
-        propName
+        propName,
+        execution
     }: {
         body: Record<string, any>;
         webhookType?: string;
@@ -130,7 +137,8 @@ export class InternalNango {
         connectionIdentifier?: string;
         connectionIdentifierValue?: string;
         propName?: string;
-    }): Promise<{ connectionIds: string[]; connectionMetadata: Record<string, Metadata | null> }> {
+        execution?: WebhookExecutionOptions;
+    }): Promise<{ connectionIds: string[]; connectionMetadata: Record<string, Metadata | null>; executionCount?: number }> {
         let connections: DBConnectionDecrypted[] | null | ConnectionInternal[] = null;
 
         const identifierValue = connectionIdentifierValue || (connectionIdentifier ? get(body, connectionIdentifier) : undefined);
@@ -188,8 +196,11 @@ export class InternalNango {
         // use webhookTypeValue if provided (direct value from headers), otherwise extract from body
         const type = webhookTypeValue || (webhookType ? get(body, webhookType) : undefined);
 
-        const publisher = envs.WEBHOOK_INGRESS_USE_DISPATCH_QUEUE && this.integration.provider !== 'context-use-agent-sync' ? dispatchQueuePublisher : null;
+        // Explicit execution options require direct orchestrator dispatch because
+        // the shared ingress queue currently carries only the default policy.
+        const publisher = envs.WEBHOOK_INGRESS_USE_DISPATCH_QUEUE && !execution ? dispatchQueuePublisher : null;
 
+        let executionCount: number | undefined;
         if (publisher) {
             await this.dispatchViaQueue({
                 publisher,
@@ -200,7 +211,14 @@ export class InternalNango {
                 webhookHeaderValue
             });
         } else {
-            await this.dispatchViaOrchestrator({ connections, syncConfigsWithWebhooks, body, type, webhookHeaderValue });
+            executionCount = await this.dispatchViaOrchestrator({
+                connections,
+                syncConfigsWithWebhooks,
+                body,
+                type,
+                webhookHeaderValue,
+                ...(execution ? { execution } : {})
+            });
         }
 
         const connectionMetadata = connections.reduce<Record<string, Metadata | null>>((acc, connection) => {
@@ -208,7 +226,11 @@ export class InternalNango {
             return acc;
         }, {});
 
-        return { connectionIds: connections.map((connection) => connection.connection_id), connectionMetadata };
+        return {
+            connectionIds: connections.map((connection) => connection.connection_id),
+            connectionMetadata,
+            ...(executionCount === undefined ? {} : { executionCount })
+        };
     }
 
     private async dispatchViaOrchestrator({
@@ -216,14 +238,16 @@ export class InternalNango {
         syncConfigsWithWebhooks,
         body,
         type,
-        webhookHeaderValue
+        webhookHeaderValue,
+        execution
     }: {
         connections: (DBConnectionDecrypted | ConnectionInternal)[];
         syncConfigsWithWebhooks: DBSyncConfig[];
         body: Record<string, any>;
         type: string | undefined;
         webhookHeaderValue: string | undefined;
-    }): Promise<void> {
+        execution?: WebhookExecutionOptions;
+    }): Promise<number> {
         const executions: OrchestratorExecution[] = [];
 
         for (const syncConfig of syncConfigsWithWebhooks) {
@@ -264,20 +288,22 @@ export class InternalNango {
             }
         }
 
-        const dispatchResult = await this.dispatchExecutionsViaOrchestrator(executions, body);
+        const dispatchResult = await this.dispatchExecutionsViaOrchestrator(executions, body, execution);
         metrics.increment(metrics.Types.WEBHOOK_DIRECT_TRIGGER_SUCCESS, dispatchResult.succeededCount, { provider: this.integration.provider });
+        return dispatchResult.succeededCount;
     }
 
     private async dispatchExecutionsViaOrchestrator(
         executions: OrchestratorExecution[],
-        body: Record<string, any>
+        body: Record<string, any>,
+        execution?: WebhookExecutionOptions
     ): Promise<{ succeededCount: number; failedExecutions: FailedOrchestratorExecution[] }> {
         const orchestrator = getOrchestrator();
         let succeededCount = 0;
         const failedExecutions: FailedOrchestratorExecution[] = [];
 
-        for (const execution of executions) {
-            const { syncConfig, webhook, connection, logCtx } = execution;
+        for (const matchedExecution of executions) {
+            const { syncConfig, webhook, connection, logCtx } = matchedExecution;
 
             try {
                 const result = await orchestrator.triggerWebhook({
@@ -285,20 +311,20 @@ export class InternalNango {
                     webhookName: webhook,
                     syncConfig,
                     input: body,
-                    maxConcurrency: this.integration.provider === 'context-use-agent-sync' ? 1 : envs.WEBHOOK_ENVIRONMENT_MAX_CONCURRENCY,
-                    retryMax: this.integration.provider === 'context-use-agent-sync' ? 3 : 0,
-                    groupByConnection: this.integration.provider === 'context-use-agent-sync',
+                    maxConcurrency: execution?.maxConcurrency ?? envs.WEBHOOK_ENVIRONMENT_MAX_CONCURRENCY,
+                    retryMax: execution?.retryMax ?? 0,
+                    groupByConnection: execution?.groupByConnection ?? false,
                     logCtx
                 });
 
                 if (result.isErr()) {
-                    failedExecutions.push({ ...execution, error: result.error });
+                    failedExecutions.push({ ...matchedExecution, error: result.error });
                     continue;
                 }
 
                 succeededCount += 1;
             } catch (err) {
-                failedExecutions.push({ ...execution, error: err });
+                failedExecutions.push({ ...matchedExecution, error: err });
             }
         }
 

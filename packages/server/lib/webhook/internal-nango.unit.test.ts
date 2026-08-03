@@ -200,6 +200,26 @@ describe('InternalNango queue dispatch', () => {
         expect(mocks.increment).toHaveBeenCalledWith('nango.webhook.direct_trigger.success', 2, { provider: 'github' });
     });
 
+    it('dispatches directly with an explicit execution policy', async () => {
+        const publisher = { publish: vi.fn() };
+        mocks.dispatchQueueClient.dispatchQueuePublisher = publisher;
+
+        const logCtx1 = createLogCtx('log-1');
+        const logCtx2 = createLogCtx('log-2');
+        const { nango } = makeInternalNango([logCtx1, logCtx2]);
+
+        const result = await nango.executeScriptForWebhooks({
+            body: { event: 'x' },
+            webhookTypeValue: 'push',
+            execution: { maxConcurrency: 1, retryMax: 3, groupByConnection: true }
+        });
+
+        expect(publisher.publish).not.toHaveBeenCalled();
+        expect(result.executionCount).toBe(2);
+        expect(mocks.triggerWebhook).toHaveBeenCalledTimes(2);
+        expect(mocks.triggerWebhook).toHaveBeenCalledWith(expect.objectContaining({ maxConcurrency: 1, retryMax: 3, groupByConnection: true }));
+    });
+
     it('continues direct orchestrator dispatch when one execution fails', async () => {
         mocks.envs.WEBHOOK_INGRESS_USE_DISPATCH_QUEUE = false;
         const publisher = { publish: vi.fn() };

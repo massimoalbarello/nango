@@ -6,35 +6,38 @@ import { Ok } from '@nangohq/utils';
 
 import type { WebhookHandler, WebhookResponse } from './types.js';
 
-const UPSERT_TYPE = 'agent.conversation.upsert';
-const STATUS_TYPE = 'agent.sync.status';
+const STATUS_TYPE = 'nango.authenticated-webhook.status';
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const eventTypeSchema = z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((value) => value === value.trim());
+const connectionIdSchema = z
+    .string()
+    .min(1)
+    .max(255)
+    .refine((value) => value === value.trim());
 
-const recordSchema = z
+const envelopeSchema = z
     .object({
-        id: z.string().min(1),
-        created_at: z.iso.datetime({ offset: true }),
-        updated_at: z.iso.datetime({ offset: true }),
-        participants: z.array(z.string().min(1)),
-        body: z.string().min(1)
+        type: eventTypeSchema,
+        connectionId: connectionIdSchema
     })
-    .strict();
-const upsertSchema = z
-    .object({
-        type: z.literal(UPSERT_TYPE),
-        connectionId: z.string().min(1),
-        batchId: z.string().min(1).max(200),
-        sentAt: z.iso.datetime({ offset: true }),
-        records: z.array(recordSchema).min(1).max(100)
-    })
-    .strict();
-const statusSchema = z.object({ type: z.literal(STATUS_TYPE), connectionId: z.string().min(1) }).strict();
+    .passthrough();
+const statusSchema = z.object({ type: z.literal(STATUS_TYPE), connectionId: connectionIdSchema }).strict();
 
-type AgentSyncMetadata = {
-    state?: unknown;
-    token_sha256?: unknown;
-};
+const metadataSchema = z
+    .object({
+        authenticated_webhook: z
+            .object({
+                state: z.enum(['active', 'revoked']),
+                token_sha256: z.string().regex(SHA256_PATTERN)
+            })
+            .strict()
+    })
+    .passthrough();
 
 function response(statusCode: number, content: Record<string, unknown>) {
     return Ok({ statusCode, content } satisfies WebhookResponse);
@@ -42,7 +45,7 @@ function response(statusCode: number, content: Record<string, unknown>) {
 
 function bearerToken(headers: Record<string, string>): string | null {
     const authorization = headers['authorization'];
-    const match = authorization?.match(/^Bearer ([A-Za-z0-9_-]{43,})$/);
+    const match = authorization?.match(/^Bearer ([A-Za-z0-9_-]{43,256})$/);
     return match?.[1] ?? null;
 }
 
@@ -54,43 +57,39 @@ function authenticated(token: string, verifier: string): boolean {
 }
 
 const route: WebhookHandler<Record<string, unknown>> = async (nango, headers, body, rawBody) => {
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        return response(400, { error: 'invalid_body' });
-    }
     if (Buffer.byteLength(rawBody, 'utf8') > MAX_BODY_BYTES) {
         return response(413, { error: 'payload_too_large' });
     }
-
-    const connectionId = typeof body['connectionId'] === 'string' ? body['connectionId'] : null;
-    const type = typeof body['type'] === 'string' ? body['type'] : null;
-    if (!connectionId || (type !== UPSERT_TYPE && type !== STATUS_TYPE)) {
-        return response(400, { error: 'invalid_body' });
-    }
+    const envelope = envelopeSchema.safeParse(body);
+    if (!envelope.success) return response(400, { error: 'invalid_body' });
+    const { connectionId, type } = envelope.data;
 
     const connection = await nango.getConnectionForWebhook(connectionId);
     if (!connection) return response(401, { error: 'invalid_credential' });
-    const metadata = (connection.metadata ?? {}) as AgentSyncMetadata;
+    const metadata = metadataSchema.safeParse(connection.metadata);
     const token = bearerToken(headers);
-    if (!token || typeof metadata.token_sha256 !== 'string' || !authenticated(token, metadata.token_sha256)) {
+    if (!token || !metadata.success || !authenticated(token, metadata.data.authenticated_webhook.token_sha256)) {
         return response(401, { error: 'invalid_credential' });
     }
-    if (metadata.state === 'revoked') return response(410, { error: 'installation_revoked' });
-    if (metadata.state !== 'active') return response(401, { error: 'installation_not_active' });
+    if (metadata.data.authenticated_webhook.state === 'revoked') return response(410, { error: 'credential_revoked' });
 
     if (type === STATUS_TYPE) {
         if (!statusSchema.safeParse(body).success) return response(400, { error: 'invalid_body' });
         return response(200, { active: true, connectionId });
     }
 
-    if (!upsertSchema.safeParse(body).success) return response(400, { error: 'invalid_body' });
-
     const dispatched = await nango.executeScriptForWebhooks({
         body,
         webhookType: 'type',
         connectionIdentifier: 'connectionId',
-        propName: 'connectionId'
+        propName: 'connectionId',
+        execution: {
+            maxConcurrency: 1,
+            retryMax: 3,
+            groupByConnection: true
+        }
     });
-    if (!dispatched.connectionIds.includes(connectionId)) {
+    if (!dispatched.connectionIds.includes(connectionId) || !dispatched.executionCount) {
         return response(503, { error: 'receiver_unavailable' });
     }
     return Ok({

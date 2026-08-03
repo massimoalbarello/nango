@@ -5467,13 +5467,13 @@ connectwise-rmm:
             pattern: '^[A-Za-z0-9._~+/=-]{8,}$'
             doc_section: '#step-2-create-api-credentials'
 
-context-use-agent-sync:
-    display_name: Context Use Agent Sync
+authenticated-webhook:
+    display_name: Authenticated Webhook
     categories:
         - other
     auth_mode: NONE
-    webhook_routing_script: contextUseAgentSyncWebhookRouting
-    docs: https://nango.dev/docs/integrations/all/context-use-agent-sync
+    webhook_routing_script: authenticatedWebhookRouting
+    docs: https://nango.dev/docs/integrations/all/authenticated-webhook
 
 conta-azul:
     display_name: Conta Azul

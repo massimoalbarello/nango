@@ -2,7 +2,7 @@
 
 > Compact provider slug catalog for agents. Use the slug to reconstruct provider-specific docs URLs only when needed.
 
-Provider count: 927
+Provider count: 928
 
 URL patterns:
 - Main provider page: https://nango.dev/docs/integrations/all/{slug}.md or https://nango.dev/docs/api-integrations/{slug}.md
@@ -82,6 +82,7 @@ URL patterns:
 | `attio-mcp` | Attio (MCP) | MCP_OAUTH2 | [docs](https://nango.dev/docs/api-integrations/attio-mcp.md) |  |  | crm, mcp |
 | `auth0` | Auth0 | OAUTH2 | [docs](https://nango.dev/docs/integrations/all/auth0.md) |  |  | iam |
 | `auth0-cc` | Auth0 (Client Credentials) | OAUTH2_CC | [docs](https://nango.dev/docs/integrations/all/auth0-cc.md) | [connect](https://nango.dev/docs/integrations/all/auth0-cc/connect.md) |  | iam |
+| `authenticated-webhook` | Authenticated Webhook | NONE | [docs](https://nango.dev/docs/integrations/all/authenticated-webhook.md) |  |  | other |
 | `autodesk` | Autodesk | OAUTH2 | [docs](https://nango.dev/docs/integrations/all/autodesk.md) |  |  | design |
 | `autosana` | Autosana | API_KEY | [docs](https://nango.dev/docs/api-integrations/autosana.md) | [connect](https://nango.dev/docs/api-integrations/autosana/connect.md) |  | dev-tools |
 | `autotask` | AutoTask | API_KEY | [docs](https://nango.dev/docs/integrations/all/autotask.md) | [connect](https://nango.dev/docs/integrations/all/autotask/connect.md) |  | support, ticketing |
