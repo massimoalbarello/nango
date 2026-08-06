@@ -1476,7 +1476,7 @@ class OAuthController {
                 // Skip token exchange and use app credentials to update the existing connection
                 // We use existingConnection.connection_id to avoid creating duplicates
                 void logCtx.info('Existing installation found, skipping token exchange', {
-                    installationId,
+                    hasInstallationId: true,
                     existingConnectionId: existingConnection.connection_id
                 });
 
