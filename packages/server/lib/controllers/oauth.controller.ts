@@ -1314,7 +1314,7 @@ class OAuthController {
             }
 
             const error = WSErrBuilder.UnknownAuthMode(session.authMode);
-            void logCtx.error(error.message, { url: req.originalUrl });
+            void logCtx.error(error.message, { url: req.path });
             await logCtx.failed();
 
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -1324,7 +1324,7 @@ class OAuthController {
 
             errorManager.report(err, { source: ErrorSourceEnum.PLATFORM, operation: LogActionEnum.AUTH, environmentId: session.environmentId });
 
-            void logCtx?.error('Unknown error', { error: err, url: req.originalUrl });
+            void logCtx?.error('Unknown error', { error: err, url: req.path });
             await logCtx?.failed();
 
             metrics.increment(metrics.Types.AUTH_FAILURE, 1, { auth_mode: 'OAUTH2', provider: session.provider });

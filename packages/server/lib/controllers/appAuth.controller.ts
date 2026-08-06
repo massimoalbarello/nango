@@ -100,7 +100,7 @@ class AppAuthController {
             if (action === 'request') {
                 void logCtx.error('App types do not support the request flow. Please use the github-app-oauth provider for the request flow.', {
                     provider: config.provider,
-                    url: req.originalUrl
+                    url: req.path
                 });
                 await logCtx.failed();
 
@@ -116,7 +116,7 @@ class AppAuthController {
 
             if (missesInterpolationParam(tokenUrl, connectionConfig)) {
                 const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfig));
-                void logCtx.error(error.message, { connectionConfig, url: req.originalUrl });
+                void logCtx.error(error.message, { connectionConfig, url: req.path });
                 await logCtx.failed();
 
                 await publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, error);
@@ -223,7 +223,7 @@ class AppAuthController {
             const error = WSErrBuilder.UnknownError();
             const content = error.message + '\n' + prettyError;
 
-            void logCtx.error(error.message, { error: err, url: req.originalUrl });
+            void logCtx.error(error.message, { error: err, url: req.path });
             await logCtx.failed();
 
             void connectionCreationFailedHook(

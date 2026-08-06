@@ -18,7 +18,9 @@ export function asyncWrapper<TEndpoint extends Endpoint<any>, Locals extends Rec
     return (req, res, next) => {
         const active = tracer.scope().active();
         if (active) {
-            active.setTag('http.route', req.route?.path || req.originalUrl);
+            // Route telemetry must never capture OAuth codes, state, Connect
+            // capabilities, or provider credentials from the query string.
+            active.setTag('http.route', req.route?.path || req.path);
             const contentLength = req.header('content-length');
             if (contentLength) {
                 const int = parseInt(contentLength, 10);

@@ -145,7 +145,9 @@ describe('AppAuthController.connect', () => {
         mockUpsertConnection.mockRejectedValue(new Error('boom'));
 
         const req = {
-            query: { installation_id: 'install-1', state: 'session-id' }
+            query: { installation_id: 'install-1', state: 'session-id' },
+            path: '/app-auth/connect',
+            originalUrl: '/app-auth/connect?installation_id=install-1&state=sensitive-oauth-state'
         } as unknown as Request;
         const res = { redirect: vi.fn(), sendStatus: vi.fn(), status: vi.fn().mockReturnThis(), send: vi.fn().mockReturnThis() } as unknown as Response;
         const next = vi.fn();
@@ -160,5 +162,7 @@ describe('AppAuthController.connect', () => {
             }),
             expect.anything()
         );
+        expect(mockLogCtx.error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ url: '/app-auth/connect' }));
+        expect(JSON.stringify(mockLogCtx.error.mock.calls)).not.toContain('sensitive-oauth-state');
     });
 });
