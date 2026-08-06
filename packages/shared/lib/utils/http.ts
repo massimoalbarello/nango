@@ -1,6 +1,7 @@
 import { Err, Ok, redactHeaders, redactObjectOrString, redactURL } from '@nangohq/utils';
 
 import { NangoInternalError } from './error.js';
+import { errorName, headerNamesOnly, stripUrlQuery } from './logging.js';
 
 import type { LogContextStateless } from '@nangohq/logs';
 import type { HTTP_METHOD, MessageHTTPRequest, MessageRow } from '@nangohq/types';
@@ -131,12 +132,13 @@ export async function loggedFetch<TBody>(
     }
 
     const createdAt = new Date();
-    const redactedUrl = redactURL({ url: url.href, valuesToFilter: options.valuesToFilter });
+    const isAuth = options.context === 'auth';
+    const redactedUrl = isAuth ? stripUrlQuery(url.href) : redactURL({ url: url.href, valuesToFilter: options.valuesToFilter });
     const requestLog: MessageHTTPRequest = {
-        headers: redactHeaders({ headers: headers }),
+        headers: isAuth ? headerNamesOnly(headers) : redactHeaders({ headers: headers, valuesToFilter: options.valuesToFilter }),
         method: props.method!,
         url: redactedUrl,
-        body: body ? redactObjectOrString({ data: body, valuesToFilter: options.valuesToFilter }) : undefined
+        body: !isAuth && body ? redactObjectOrString({ data: body, valuesToFilter: options.valuesToFilter }) : undefined
     };
     try {
         const res = redirect ? await fetchFollowingPolicyRedirects(url, props, redirect) : await fetch(url, props);
@@ -151,15 +153,15 @@ export async function loggedFetch<TBody>(
         if (res.status >= 300) {
             void options.logCtx.http(`${props.method} ${redactedUrl}`, {
                 request: requestLog,
-                response: { code: res.status, headers: redactHeaders({ headers: res.headers }) },
+                response: { code: res.status, headers: isAuth ? headerNamesOnly(res.headers) : redactHeaders({ headers: res.headers }) },
                 context: options.context,
                 createdAt,
-                meta: { body }
+                ...(!isAuth && { meta: { body } })
             });
         } else {
             void options.logCtx.http(`${props.method} ${redactedUrl}`, {
                 request: requestLog,
-                response: { code: res.status, headers: redactHeaders({ headers: res.headers }) },
+                response: { code: res.status, headers: isAuth ? headerNamesOnly(res.headers) : redactHeaders({ headers: res.headers }) },
                 context: options.context,
                 createdAt
             });
@@ -179,7 +181,7 @@ export async function loggedFetch<TBody>(
             response: undefined,
             context: options.context,
             createdAt,
-            error: error
+            ...(isAuth ? { meta: { causeType: errorName(error) } } : { error })
         });
 
         return Err(new NangoInternalError('fetch_unknown_error', { cause: err }));

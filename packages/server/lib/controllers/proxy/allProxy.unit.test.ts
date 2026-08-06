@@ -356,7 +356,7 @@ describe('handleErrorResponse', () => {
                 message: 'This base URL override is not allowed by server configuration.'
             }
         });
-        expect(mockLogCtx.error).toHaveBeenCalledWith('Proxy redirect denied by denylist', { error: err.cause });
+        expect(mockLogCtx.error).toHaveBeenCalledWith('Proxy redirect denied by denylist', { errorCode: 'proxy_redirect_to_denied_host' });
     });
 
     it('should return upstream status and send errorObject when Axios error has no response.data', () => {
@@ -473,8 +473,8 @@ describe('handleErrorResponse', () => {
         expect(res.status).toHaveBeenCalledWith(404);
         expect(res.set).toHaveBeenCalledWith(expect.objectContaining({ 'content-type': 'application/json; charset=utf-8' }));
         expect(sendFn).toHaveBeenCalledWith(body);
-        expect(mockLogCtx.error).toHaveBeenCalledWith('Failed with this body', {
-            body: expect.objectContaining({ error: 'This event is not found (4)!' })
+        expect(mockLogCtx.error).toHaveBeenCalledWith('Upstream request failed', {
+            responseBody: { present: true, fieldNames: ['error'] }
         });
     });
 });

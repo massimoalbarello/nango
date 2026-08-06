@@ -7,6 +7,7 @@ import { Err, FixedSizeMap, getLogger, metrics, Ok } from '@nangohq/utils';
 import { decode as decodeJwt } from '../../../auth/jwt.js';
 import providerClient from '../../../clients/provider.client.js';
 import { NangoError } from '../../../utils/error.js';
+import { errorName } from '../../../utils/logging.js';
 import { isTokenExpired } from '../../../utils/utils.js';
 import connectionService from '../../connection.service.js';
 import { getExpiresAtFromCredentials, REFRESH_FAILURE_COOLDOWN_MS, REFRESH_MARGIN_MS } from '../utils.js';
@@ -213,7 +214,7 @@ async function refreshCredentials(
         logCtx.merge(logsBuffer);
 
         metrics.increment(metrics.Types.REFRESH_CONNECTIONS_FAILED);
-        void logCtx.error('Failed to refresh credentials', err);
+        void logCtx.error('Failed to refresh credentials', { errorType: err.type, causeType: errorName(err) });
         await logCtx.failed();
 
         await onRefreshFailed({
@@ -285,7 +286,7 @@ async function testCredentials(
         );
         logCtx.merge(logsBuffer);
 
-        void logCtx.error('Failed to verify connection', result.error);
+        void logCtx.error('Failed to verify connection', { errorType: result.error.type, causeType: errorName(result.error) });
         await logCtx.failed();
 
         metrics.increment(metrics.Types.REFRESH_CONNECTIONS_FAILED);

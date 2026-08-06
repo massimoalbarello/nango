@@ -2,8 +2,9 @@ import { finished, Readable } from 'node:stream';
 
 import { isAxiosError } from 'axios';
 
-import { axiosInstance as axios, Err, getLogger, Ok, redactHeaders, redactURL, retryFlexible } from '@nangohq/utils';
+import { axiosInstance as axios, Err, getLogger, Ok, retryFlexible } from '@nangohq/utils';
 
+import { errorName, headerNamesOnly, urlWithQueryParameterNames } from '../../utils/logging.js';
 import { createMeteringTransport } from './byte-metering-transport.js';
 import { getProxyRetryFromErr } from './retry.js';
 import { getAxiosConfiguration, ProxyError } from './utils.js';
@@ -203,17 +204,6 @@ export class ProxyRequest {
         return await axios.request(axiosConfig);
     }
 
-    private buildValuesToFilter(): string[] {
-        const values: string[] = this.connection ? Object.values(this.connection.credentials).filter((v): v is string => typeof v === 'string') : [];
-        if (this.integrationConfig?.oauth_client_secret) {
-            values.push(this.integrationConfig.oauth_client_secret);
-        }
-        if (this.integrationConfig?.oauth_client_id) {
-            values.push(this.integrationConfig.oauth_client_id);
-        }
-        return values;
-    }
-
     private fireOnBytes(bytes: MeteredBytes): void {
         if (!this.onBytes) {
             return;
@@ -232,12 +222,11 @@ export class ProxyRequest {
     }
 
     private async logErrorResponse({ error, retryAttempt, start }: { error: unknown; retryAttempt: RetryAttemptArgument; start: Date }): Promise<void> {
-        const valuesToFilter = this.buildValuesToFilter();
-        const redactedURL = redactURL({ url: this.axiosConfig?.url || '', valuesToFilter });
+        const redactedURL = urlWithQueryParameterNames(this.axiosConfig?.url || '');
         const endedAt = new Date();
 
         if (isAxiosError(error)) {
-            const safeHeaders = redactHeaders({ headers: this.axiosConfig?.headers, valuesToFilter });
+            const safeHeaders = headerNamesOnly(this.axiosConfig?.headers);
             await this.logger({
                 type: 'http',
                 level: 'error',
@@ -254,11 +243,11 @@ export class ProxyRequest {
                 },
                 response: {
                     code: error.response?.status || 500,
-                    headers: redactHeaders({ headers: error.response?.headers })
+                    headers: headerNamesOnly(error.response?.headers)
                 },
                 error: {
                     name: error.name,
-                    message: error.message,
+                    message: 'Proxy request failed',
                     payload: {
                         code: error.code
                         // data: error.response?.data, contains too much data
@@ -276,16 +265,15 @@ export class ProxyRequest {
                 endedAt: endedAt.toISOString(),
                 durationMs: endedAt.getTime() - start.getTime(),
                 message: `${this.config.method} ${redactedURL}`,
-                error: error as any,
+                error: { name: errorName(error), message: 'Proxy request failed' },
                 retry: retryAttempt
             });
         }
     }
 
     private async logResponse({ response, retryAttempt, start }: { response: AxiosResponse; retryAttempt: RetryAttemptArgument; start: Date }): Promise<void> {
-        const valuesToFilter = this.buildValuesToFilter();
-        const safeHeaders = redactHeaders({ headers: this.axiosConfig?.headers, valuesToFilter });
-        const redactedURL = redactURL({ url: this.axiosConfig?.url || '', valuesToFilter });
+        const safeHeaders = headerNamesOnly(this.axiosConfig?.headers);
+        const redactedURL = urlWithQueryParameterNames(this.axiosConfig?.url || '');
         const endedAt = new Date();
 
         await this.logger({
@@ -304,7 +292,7 @@ export class ProxyRequest {
             },
             response: {
                 code: response.status,
-                headers: redactHeaders({ headers: response.headers })
+                headers: headerNamesOnly(response.headers)
             },
             retry: retryAttempt
         });

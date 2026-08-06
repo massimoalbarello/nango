@@ -31,7 +31,7 @@ import {
     providerClientManager,
     syncEndUserToConnection
 } from '@nangohq/shared';
-import { errorToObject, metrics, stringifyError } from '@nangohq/utils';
+import { metrics } from '@nangohq/utils';
 
 import { OAuth1Client } from '../clients/oauth1.client.js';
 import publisher from '../clients/publisher.client.js';
@@ -46,6 +46,7 @@ import oAuthSessionService from '../services/oauth-session.service.js';
 import { errorRestrictConnectionId, isIntegrationAllowed, resolveOutboundWebhookUrlOverride } from '../utils/auth.js';
 import { hmacCheck } from '../utils/hmac.js';
 import { authHtml } from '../utils/html.js';
+import { errorName, sensitiveFields } from '../utils/logging.js';
 import {
     getAdditionalAuthorizationParams,
     getConnectionMetadataFromCallbackRequest,
@@ -263,11 +264,10 @@ class OAuthController {
                     };
                 }
 
-                const obfuscatedClientSecret = config.oauth_client_secret ? config.oauth_client_secret.slice(0, 4) + '***' : '';
-
                 void logCtx.info('Credentials override', {
-                    oauth_client_id: config.oauth_client_id,
-                    oauth_client_secret: obfuscatedClientSecret
+                    hasOauthClientId: Boolean(config.oauth_client_id),
+                    hasOauthClientSecret: Boolean(config.oauth_client_secret),
+                    hasOauthRefreshToken: Boolean(overrideCredentials['oauth_refresh_token_override'])
                 });
             }
 
@@ -342,21 +342,20 @@ class OAuthController {
             await publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, error);
             return;
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
             const error = WSErrBuilder.UnknownError();
             if (logCtx) {
-                void logCtx.error(error.message, { error: err });
+                void logCtx.error(error.message, { causeType: errorName(err), providerConfigKey, connectionId });
                 await logCtx.failed();
             }
 
-            errorManager.report(err, {
+            errorManager.report(new Error('oauth_authorization_request_failed'), {
                 source: ErrorSourceEnum.PLATFORM,
                 operation: LogActionEnum.AUTH,
                 environmentId,
-                metadata: { providerConfigKey, connectionId }
+                metadata: { providerConfigKey, connectionId, causeType: errorName(err) }
             });
 
-            return publisher.notifyErr(res, wsClientId, providerConfigKey, receivedConnectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, wsClientId, providerConfigKey, receivedConnectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -482,8 +481,9 @@ class OAuthController {
             }
 
             if (missesInterpolationParam(tokenUrl, connectionConfig)) {
-                const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfig));
-                void logCtx.error(error.message, { connectionConfig });
+                const connectionConfigSummary = sensitiveFields(connectionConfig);
+                const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfigSummary.fieldNames));
+                void logCtx.error(error.message, { connectionConfig: connectionConfigSummary });
                 await logCtx.failed();
 
                 errorManager.errRes(res, error.message);
@@ -507,7 +507,7 @@ class OAuthController {
             });
 
             if (!success || !credentials) {
-                void logCtx.error('Error during OAuth2 client credentials creation', { error, provider: config.provider });
+                void logCtx.error('Error during OAuth2 client credentials creation', { causeType: errorName(error), provider: config.provider });
                 await logCtx.failed();
 
                 errorManager.errResFromNangoErr(res, error);
@@ -544,7 +544,7 @@ class OAuthController {
             });
 
             if (customValidationResponse.isErr()) {
-                void logCtx.error('Connection failed custom validation', { error: customValidationResponse.error });
+                void logCtx.error('Connection failed custom validation', { causeType: errorName(customValidationResponse.error) });
 
                 const message = await handleValidateConnectionFailure({
                     operation: updatedConnection.operation,
@@ -595,8 +595,6 @@ class OAuthController {
 
             res.status(200).send({ providerConfigKey: providerConfigKey, connectionId: connectionId });
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
             void connectionCreationFailedHook(
                 {
                     connection: { connection_id: receivedConnectionId!, provider_config_key: providerConfigKey!, webhook_url_override: webhookUrlOverride },
@@ -605,30 +603,31 @@ class OAuthController {
                     auth_mode: 'OAUTH2_CC',
                     error: {
                         type: 'unknown',
-                        description: `Error during Unauth create: ${prettyError}`
+                        description: 'OAuth2 client credentials creation failed'
                     },
                     operation: 'unknown'
                 },
                 account
             );
             if (logCtx) {
-                void logCtx.error('Error during OAuth2 client credentials creation', { error: err });
+                void logCtx.error('Error during OAuth2 client credentials creation', { causeType: errorName(err) });
                 await logCtx.failed();
             }
 
-            errorManager.report(err, {
+            errorManager.report(new Error('oauth_client_credentials_failed'), {
                 source: ErrorSourceEnum.PLATFORM,
                 operation: LogActionEnum.AUTH,
                 environmentId: environment.id,
                 metadata: {
                     providerConfigKey,
-                    connectionId: receivedConnectionId
+                    connectionId: receivedConnectionId,
+                    causeType: errorName(err)
                 }
             });
 
             metrics.increment(metrics.Types.AUTH_FAILURE, 1, { auth_mode: 'OAUTH2_CC', ...(config ? { provider: config.provider } : {}) });
 
-            next(err);
+            next(new Error('oauth_client_credentials_failed'));
         }
     }
 
@@ -764,13 +763,12 @@ class OAuthController {
                 }
 
                 void logCtx.info('Redirecting', {
-                    authorizationUri,
                     providerConfigKey,
                     connectionId,
-                    allAuthParams,
-                    connectionConfig,
+                    authorizationParams: sensitiveFields(allAuthParams),
+                    connectionConfig: sensitiveFields(connectionConfig),
                     grantType: provider.token_params?.grant_type as string,
-                    scopes: providerConfig.oauth_scopes ? providerConfig.oauth_scopes.split(',').join(provider.scope_separator || ' ') : ''
+                    hasScopes: Boolean(providerConfig.oauth_scopes)
                 });
 
                 res.cookie(`oauth2-${session.id}`, '1', {
@@ -788,7 +786,7 @@ class OAuthController {
                 void logCtx.error('Redirecting', {
                     grantType,
                     basicAuthEnabled: provider.token_request_auth_method === 'basic',
-                    connectionConfig
+                    connectionConfig: sensitiveFields(connectionConfig)
                 });
                 await logCtx.failed();
 
@@ -796,14 +794,16 @@ class OAuthController {
                 return;
             }
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
             const error = WSErrBuilder.UnknownError();
 
-            void logCtx.error(WSErrBuilder.UnknownError().message, { error, connectionConfig });
+            void logCtx.error(WSErrBuilder.UnknownError().message, {
+                errorType: error.type,
+                connectionConfig: sensitiveFields(connectionConfig),
+                causeType: errorName(err)
+            });
             await logCtx.failed();
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -829,9 +829,10 @@ class OAuthController {
 
         try {
             if (missesInterpolationParam(provider.authorization_url!, connectionConfig)) {
-                const error = WSErrBuilder.InvalidConnectionConfig(provider.authorization_url!, JSON.stringify(connectionConfig));
+                const connectionConfigSummary = sensitiveFields(connectionConfig);
+                const error = WSErrBuilder.InvalidConnectionConfig(provider.authorization_url!, JSON.stringify(connectionConfigSummary.fieldNames));
 
-                void logCtx.error(error.message, { ...connectionConfig });
+                void logCtx.error(error.message, { connectionConfig: connectionConfigSummary });
                 await logCtx.failed();
 
                 await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -850,7 +851,7 @@ class OAuthController {
 
             const authorizationUri = `${appUrl}?${params.toString()}`;
 
-            void logCtx.info('Redirecting', { authorizationUri, providerConfigKey, connectionId, connectionConfig });
+            void logCtx.info('Redirecting', { providerConfigKey, connectionId, connectionConfig: sensitiveFields(connectionConfig) });
 
             res.cookie(`oauth2-${session.id}`, '1', {
                 maxAge: 60 * 60 * 1000,
@@ -861,12 +862,10 @@ class OAuthController {
 
             res.redirect(authorizationUri);
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
-            void logCtx.error('Unknown error', { connectionConfig });
+            void logCtx.error('Unknown error', { connectionConfig: sensitiveFields(connectionConfig), causeType: errorName(err) });
             await logCtx.failed();
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -884,16 +883,14 @@ class OAuthController {
 
             const authorizationUri = `${config.app_link}?${params.toString()}`;
 
-            void logCtx.info('Redirecting to install URL', { authorizationUri, providerConfigKey, connectionId });
+            void logCtx.info('Redirecting to install URL', { providerConfigKey, connectionId });
 
             res.redirect(authorizationUri);
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
-            void logCtx.error('Unknown error');
+            void logCtx.error('Unknown error', { causeType: errorName(err) });
             await logCtx.failed();
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -989,13 +986,12 @@ class OAuthController {
             }
 
             void logCtx.info('Redirecting', {
-                authorizationUri,
                 providerConfigKey,
                 connectionId,
-                allAuthParams: authParams,
-                connectionConfig,
+                authorizationParams: sensitiveFields(authParams),
+                connectionConfig: sensitiveFields(connectionConfig),
                 grantType: provider.token_params?.['grant_type'] as string,
-                scopes
+                hasScopes: Boolean(scopes)
             });
 
             res.cookie(`oauth2-${session.id}`, '1', {
@@ -1007,12 +1003,10 @@ class OAuthController {
 
             res.redirect(authorizationUri);
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
-            void logCtx.error('Unknown error', { connectionConfig });
+            void logCtx.error('Unknown error', { connectionConfig: sensitiveFields(connectionConfig), causeType: errorName(err) });
             await logCtx.failed();
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -1043,7 +1037,7 @@ class OAuthController {
         try {
             const mcpServerUrl = connectionConfig['mcp_server_url'];
             if (!mcpServerUrl) {
-                const error = WSErrBuilder.InvalidConnectionConfig('mcp_server_url', JSON.stringify(connectionConfig));
+                const error = WSErrBuilder.InvalidConnectionConfig('mcp_server_url', JSON.stringify(sensitiveFields(connectionConfig).fieldNames));
                 void logCtx.error(error.message);
                 await logCtx.failed();
                 await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -1052,7 +1046,7 @@ class OAuthController {
 
             const discoveryResult = await genericMcpClient.discoverMcpMetadata(mcpServerUrl, logCtx);
             if (!discoveryResult.success || !discoveryResult.metadata) {
-                const error = WSErrBuilder.UnknownError(discoveryResult.error || 'Failed to discover MCP metadata');
+                const error = WSErrBuilder.UnknownError('Failed to discover MCP metadata');
                 void logCtx.error(error.message);
                 await logCtx.failed();
                 await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -1113,10 +1107,9 @@ class OAuthController {
             await oAuthSessionService.create(session);
 
             void logCtx.info('Redirecting to authorization URL', {
-                authorizationUrl: authResult.authorizationUrl.href,
                 providerConfigKey,
                 connectionId,
-                scopes: scopes || ''
+                hasScopes: Boolean(scopes)
             });
 
             res.cookie(`oauth2-${session.id}`, '1', {
@@ -1127,12 +1120,10 @@ class OAuthController {
             });
             res.redirect(authResult.authorizationUrl.href);
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
-            void logCtx.error('Unknown error', { connectionConfig });
+            void logCtx.error('Unknown error', { connectionConfig: sensitiveFields(connectionConfig), causeType: errorName(err) });
             await logCtx.failed();
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -1150,7 +1141,7 @@ class OAuthController {
 
         const oAuth1CallbackURL = `${callbackUrl}?${callbackParams.toString()}`;
 
-        void logCtx.info('OAuth callback URL was retrieved', { url: oAuth1CallbackURL });
+        void logCtx.info('OAuth callback URL was prepared', { providerConfigKey, connectionId });
 
         const oAuth1Client = new OAuth1Client(config, provider, oAuth1CallbackURL);
 
@@ -1158,16 +1149,15 @@ class OAuthController {
         try {
             tokenResult = await oAuth1Client.getOAuthRequestToken();
         } catch (err) {
-            const error = errorToObject(err);
             errorManager.report(new Error('token_retrieval_error'), {
                 source: ErrorSourceEnum.PLATFORM,
                 operation: LogActionEnum.AUTH,
                 environmentId: session.environmentId,
-                metadata: error
+                metadata: { providerConfigKey, connectionId, causeType: errorName(err) }
             });
 
             const userError = WSErrBuilder.TokenError();
-            void logCtx.error(userError.message, { error: err, url: oAuth1CallbackURL });
+            void logCtx.error(userError.message, { causeType: errorName(err), providerConfigKey, connectionId });
             await logCtx.failed();
 
             return publisher.notifyErr(res, channel, providerConfigKey, connectionId, userError);
@@ -1179,8 +1169,7 @@ class OAuthController {
 
         void logCtx.info('Successfully requested token. Redirecting...', {
             providerConfigKey,
-            connectionId,
-            redirectUrl
+            connectionId
         });
 
         // All worked, let's redirect the user to the authorization page
@@ -1194,7 +1183,7 @@ class OAuthController {
         const action = req.query['setup_action'] as string;
 
         if (!state && installation_id && action) {
-            res.redirect(req.get('referer') || req.get('Referer') || req.headers.referer || 'https://github.com');
+            authHtml({ res });
             return;
         }
         if (state == null) {
@@ -1208,13 +1197,17 @@ class OAuthController {
         try {
             session = await oAuthSessionService.findById(state as string);
         } catch (err) {
-            errorManager.report(err, { source: ErrorSourceEnum.PLATFORM, operation: LogActionEnum.AUTH });
+            errorManager.report(new Error('oauth_state_lookup_failed'), {
+                source: ErrorSourceEnum.PLATFORM,
+                operation: LogActionEnum.AUTH,
+                metadata: { causeType: errorName(err) }
+            });
             authHtml({ res, error: 'invalid_oauth_state' });
             return;
         }
 
         if (session == null) {
-            const err = new Error(`No session found for state: ${JSON.stringify(state)}`);
+            const err = new Error('No session found for OAuth callback state');
 
             errorManager.report(err, { source: ErrorSourceEnum.PLATFORM, operation: LogActionEnum.AUTH });
             authHtml({ res, error: err.message });
@@ -1320,16 +1313,19 @@ class OAuthController {
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
             return;
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
+            errorManager.report(new Error('oauth_callback_failed'), {
+                source: ErrorSourceEnum.PLATFORM,
+                operation: LogActionEnum.AUTH,
+                environmentId: session.environmentId,
+                metadata: { providerConfigKey, connectionId, causeType: errorName(err) }
+            });
 
-            errorManager.report(err, { source: ErrorSourceEnum.PLATFORM, operation: LogActionEnum.AUTH, environmentId: session.environmentId });
-
-            void logCtx?.error('Unknown error', { error: err, url: req.path });
+            void logCtx?.error('Unknown error', { causeType: errorName(err), url: req.path, providerConfigKey, connectionId });
             await logCtx?.failed();
 
             metrics.increment(metrics.Types.AUTH_FAILURE, 1, { auth_mode: 'OAUTH2', provider: session.provider });
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -1377,7 +1373,7 @@ class OAuthController {
                 environmentId: environment.id
             });
             if (connectSessionRes.isErr()) {
-                void logCtx.error('Failed to get session', { error: connectSessionRes.error });
+                void logCtx.error('Failed to get session', { causeType: errorName(connectSessionRes.error) });
                 await logCtx.failed();
                 await publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError('failed to get session'));
                 return;
@@ -1416,7 +1412,7 @@ class OAuthController {
         );
 
         if (connectionResponse.isErr()) {
-            void logCtx.error('Failed to finish connection', { error: connectionResponse.error });
+            void logCtx.error('Failed to finish connection', { causeType: errorName(connectionResponse.error) });
             await logCtx.failed();
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError('failed to finish connection'));
             return;
@@ -1523,15 +1519,14 @@ class OAuthController {
         if (!authorizationCode) {
             const providerContext = WSErrBuilder.getProviderErrorContextFromQuery(req.query as Record<string, unknown>);
             const error = WSErrBuilder.InvalidCallbackOAuth2(providerContext);
-            void logCtx.error(error.message, {
+            const storedError = WSErrBuilder.InvalidCallbackOAuth2();
+            void logCtx.error(storedError.message, {
                 config: {
-                    scopes: config.oauth_scopes,
+                    hasScopes: Boolean(config.oauth_scopes),
                     basicAuthEnabled: provider.token_request_auth_method === 'basic',
-                    tokenParams: provider.token_params as string
+                    tokenParams: sensitiveFields(provider.token_params)
                 },
-                response: {
-                    ...(req.query && { queryParams: req.query })
-                }
+                callbackQuery: sensitiveFields(req.query)
             });
             await logCtx.failed();
 
@@ -1543,7 +1538,7 @@ class OAuthController {
                     auth_mode: provider.auth_mode,
                     error: {
                         type: 'invalid_callback',
-                        description: error.message
+                        description: storedError.message
                     },
                     operation: 'unknown'
                 },
@@ -1557,7 +1552,7 @@ class OAuthController {
         if (session.authMode === 'CUSTOM' && req.query['setup_action'] === 'update' && installationId) {
             // this means the update request was performed from the provider itself
             if (!req.query['state']) {
-                res.redirect(req.get('referer') || req.get('Referer') || req.headers.referer || 'https://github.com');
+                authHtml({ res });
 
                 return;
             }
@@ -1613,9 +1608,9 @@ class OAuthController {
         if (!authorizationCode) {
             const error = WSErrBuilder.InvalidCallbackOAuth2();
             void logCtx.error(error.message, {
-                scopes: config.oauth_scopes,
+                hasScopes: Boolean(config.oauth_scopes),
                 basicAuthEnabled: provider.token_request_auth_method === 'basic',
-                tokenParams: provider.token_params as string
+                tokenParams: sensitiveFields(provider.token_params)
             });
             await logCtx.failed();
 
@@ -1700,11 +1695,11 @@ class OAuthController {
                 provider: session.provider,
                 providerConfigKey,
                 connectionId,
-                additionalTokenParams,
-                authorizationCode,
-                scopes: config.oauth_scopes,
+                additionalTokenParams: sensitiveFields(additionalTokenParams),
+                hasAuthorizationCode: Boolean(authorizationCode),
+                hasScopes: Boolean(config.oauth_scopes),
                 basicAuthEnabled: provider.token_request_auth_method === 'basic',
-                tokenParams: provider.token_params
+                tokenParams: sensitiveFields(provider.token_params)
             });
 
             const tokenUrl = typeof provider.token_url === 'string' ? provider.token_url : (provider.token_url?.['OAUTH2'] as string);
@@ -1744,7 +1739,10 @@ class OAuthController {
             try {
                 parsedRawCredentials = connectionService.parseRawCredentials(rawCredentials, 'OAUTH2', provider as ProviderOAuth2) as OAuth2Credentials;
             } catch (err) {
-                void logCtx.error('The OAuth token response from the server could not be parsed - OAuth flow failed.', { error: err, rawCredentials });
+                void logCtx.error('The OAuth token response from the server could not be parsed - OAuth flow failed.', {
+                    causeType: errorName(err),
+                    tokenResponse: sensitiveFields(rawCredentials)
+                });
                 await logCtx.failed();
 
                 void connectionCreationFailedHook(
@@ -1899,7 +1897,7 @@ class OAuthController {
             });
 
             if (customValidationResponse.isErr()) {
-                void logCtx.error('Connection failed custom validation', { error: customValidationResponse.error });
+                void logCtx.error('Connection failed custom validation', { causeType: errorName(customValidationResponse.error) });
 
                 const message = await handleValidateConnectionFailure({
                     operation: updatedConnection.operation,
@@ -1932,11 +1930,11 @@ class OAuthController {
             void logCtx.debug(
                 `OAuth connection successful${provider.auth_mode === 'CUSTOM' && !installationId ? ' and request for app approval is pending' : ''}`,
                 {
-                    additionalTokenParams,
-                    authorizationCode,
-                    scopes: config.oauth_scopes,
+                    additionalTokenParams: sensitiveFields(additionalTokenParams),
+                    hasAuthorizationCode: Boolean(authorizationCode),
+                    hasScopes: Boolean(config.oauth_scopes),
                     basicAuthEnabled: provider.token_request_auth_method === 'basic',
-                    tokenParams: provider.token_params
+                    tokenParams: sensitiveFields(provider.token_params)
                 }
             );
 
@@ -1988,19 +1986,8 @@ class OAuthController {
                     session.webhookUrlOverride
                 );
                 if (createRes.isErr()) {
-                    let responseData = null;
-                    if (
-                        createRes.error instanceof Error &&
-                        'cause' in createRes.error &&
-                        createRes.error.cause &&
-                        typeof createRes.error.cause === 'object' &&
-                        'response' in createRes.error.cause
-                    ) {
-                        responseData = (createRes.error.cause as any).response?.data;
-                    }
-
                     void logCtx.error('Failed to create credentials', {
-                        responseData: responseData ? JSON.stringify(responseData, null, 2) : null
+                        causeType: errorName(createRes.error)
                     });
                     await logCtx.failed();
                     if (res) {
@@ -2025,18 +2012,18 @@ class OAuthController {
             }
             return;
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-            errorManager.report(err, {
+            errorManager.report(new Error('oauth_token_exchange_failed'), {
                 source: ErrorSourceEnum.PLATFORM,
                 operation: LogActionEnum.AUTH,
                 environmentId: session.environmentId,
                 metadata: {
                     providerConfigKey,
-                    connectionId
+                    connectionId,
+                    causeType: errorName(err)
                 }
             });
 
-            void logCtx.error(prettyError, { error: err });
+            void logCtx.error('OAuth token exchange failed', { causeType: errorName(err), provider: session.provider, providerConfigKey, connectionId });
             await logCtx.failed();
 
             void connectionCreationFailedHook(
@@ -2047,7 +2034,7 @@ class OAuthController {
                     auth_mode: provider.auth_mode,
                     error: {
                         type: 'unknown',
-                        description: prettyError
+                        description: 'OAuth token exchange failed'
                     },
                     operation: 'unknown'
                 },
@@ -2058,10 +2045,7 @@ class OAuthController {
             metrics.increment(metrics.Types.AUTH_FAILURE, 1, { auth_mode: 'OAUTH2', provider: config.provider });
 
             if (res) {
-                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, {
-                    type: 'unknown_err',
-                    message: prettyError
-                });
+                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
             }
         }
     }
@@ -2125,7 +2109,7 @@ class OAuthController {
         });
 
         if (customValidationResponse.isErr()) {
-            void logCtx.error('Connection failed custom validation', { error: customValidationResponse.error });
+            void logCtx.error('Connection failed custom validation', { causeType: errorName(customValidationResponse.error) });
 
             const message = await handleValidateConnectionFailure({
                 operation: updatedConnection.operation,
@@ -2301,7 +2285,7 @@ class OAuthController {
                 });
 
                 if (customValidationResponse.isErr()) {
-                    void logCtx.error('Connection failed custom validation', { error: customValidationResponse.error });
+                    void logCtx.error('Connection failed custom validation', { causeType: errorName(customValidationResponse.error) });
 
                     const message = await handleValidateConnectionFailure({
                         operation: updatedConnection.operation,
@@ -2331,7 +2315,7 @@ class OAuthController {
                     });
                 }
 
-                void logCtx.info('OAuth connection was successful', { url: session.callbackUrl, providerConfigKey });
+                void logCtx.info('OAuth connection was successful', { providerConfigKey });
 
                 await logCtx.enrichOperation({
                     connectionId: updatedConnection.connection.id,
@@ -2365,18 +2349,17 @@ class OAuthController {
                 });
             })
             .catch(async (err: unknown) => {
-                errorManager.report(err, {
+                errorManager.report(new Error('oauth1_token_exchange_failed'), {
                     source: ErrorSourceEnum.PLATFORM,
                     operation: LogActionEnum.AUTH,
                     environmentId: session.environmentId,
                     metadata: {
-                        ...metadata,
+                        callbackMetadata: sensitiveFields(metadata),
                         providerConfigKey: session.providerConfigKey,
-                        connectionId: session.connectionId
+                        connectionId: session.connectionId,
+                        causeType: errorName(err)
                     }
                 });
-                const prettyError = stringifyError(err, { pretty: true });
-
                 const error = WSErrBuilder.UnknownError();
                 void logCtx.error(error.message);
                 await logCtx.failed();
@@ -2389,7 +2372,7 @@ class OAuthController {
                         auth_mode: provider.auth_mode,
                         error: {
                             type: 'unknown',
-                            description: error.message + '\n' + prettyError
+                            description: 'OAuth1 token exchange failed'
                         },
                         operation: 'unknown'
                     },
@@ -2398,7 +2381,7 @@ class OAuthController {
                 );
                 metrics.increment(metrics.Types.AUTH_FAILURE, 1, { auth_mode: 'OAUTH1', provider: config.provider });
 
-                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+                return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
             });
     }
 
@@ -2420,7 +2403,7 @@ class OAuthController {
         if (!authorizationCode) {
             const providerContext = WSErrBuilder.getProviderErrorContextFromQuery(req.query as Record<string, unknown>);
             const error = WSErrBuilder.InvalidCallbackOAuth2(providerContext);
-            void logCtx.error(error.message);
+            void logCtx.error(WSErrBuilder.InvalidCallbackOAuth2().message, { callbackQuery: sensitiveFields(req.query) });
             await logCtx.failed();
             return publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
         }
@@ -2432,7 +2415,7 @@ class OAuthController {
         const mcpServerUrl = session.connectionConfig['mcp_server_url'];
 
         if (!metadataStr || !clientInfoStr || !codeVerifier || !mcpServerUrl) {
-            const error = WSErrBuilder.InvalidConnectionConfig('oauth_session_data', JSON.stringify(session.connectionConfig));
+            const error = WSErrBuilder.InvalidConnectionConfig('oauth_session_data', JSON.stringify(sensitiveFields(session.connectionConfig).fieldNames));
             void logCtx.error(error.message);
             await logCtx.failed();
             return publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -2536,19 +2519,18 @@ class OAuthController {
                 connectionId
             });
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
-            errorManager.report(err, {
+            errorManager.report(new Error('mcp_oauth_token_exchange_failed'), {
                 source: ErrorSourceEnum.PLATFORM,
                 operation: LogActionEnum.AUTH,
                 environmentId: session.environmentId,
                 metadata: {
                     providerConfigKey: session.providerConfigKey,
-                    connectionId: session.connectionId
+                    connectionId: session.connectionId,
+                    causeType: errorName(err)
                 }
             });
 
-            void logCtx.error('Unknown error', { error: err });
+            void logCtx.error('MCP OAuth token exchange failed', { causeType: errorName(err), providerConfigKey, connectionId });
             await logCtx.failed();
 
             void connectionCreationFailedHook(
@@ -2559,7 +2541,7 @@ class OAuthController {
                     auth_mode: provider.auth_mode,
                     error: {
                         type: 'unknown',
-                        description: prettyError
+                        description: 'MCP OAuth token exchange failed'
                     },
                     operation: 'unknown'
                 },
@@ -2572,7 +2554,7 @@ class OAuthController {
                 provider: config.provider
             });
 
-            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, channel, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
         }
     }
 
@@ -2596,9 +2578,10 @@ class OAuthController {
         res: Response;
     }): Promise<boolean> {
         if (missesInterpolationParam(provider.authorization_url!, connectionConfig)) {
-            const error = WSErrBuilder.InvalidConnectionConfig(provider.authorization_url!, JSON.stringify(connectionConfig));
+            const connectionConfigSummary = sensitiveFields(connectionConfig);
+            const error = WSErrBuilder.InvalidConnectionConfig(provider.authorization_url!, JSON.stringify(connectionConfigSummary.fieldNames));
 
-            void logCtx.error(error.message, { connectionConfig });
+            void logCtx.error(error.message, { connectionConfig: connectionConfigSummary });
             await logCtx.failed();
 
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -2606,8 +2589,9 @@ class OAuthController {
         }
 
         if (tokenUrl && missesInterpolationParam(tokenUrl, connectionConfig)) {
-            const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfig));
-            void logCtx.error(error.message, { connectionConfig });
+            const connectionConfigSummary = sensitiveFields(connectionConfig);
+            const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfigSummary.fieldNames));
+            void logCtx.error(error.message, { connectionConfig: connectionConfigSummary });
             await logCtx.failed();
 
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -2615,8 +2599,9 @@ class OAuthController {
         }
 
         if (provider.authorization_params && missesInterpolationParamInObject(provider.authorization_params, connectionConfig)) {
-            const error = WSErrBuilder.InvalidConnectionConfig('authorization_params', JSON.stringify(connectionConfig));
-            void logCtx.error(error.message, { connectionConfig });
+            const connectionConfigSummary = sensitiveFields(connectionConfig);
+            const error = WSErrBuilder.InvalidConnectionConfig('authorization_params', JSON.stringify(connectionConfigSummary.fieldNames));
+            void logCtx.error(error.message, { connectionConfig: connectionConfigSummary });
             await logCtx.failed();
 
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);
@@ -2624,8 +2609,9 @@ class OAuthController {
         }
 
         if (provider.token_params && missesInterpolationParamInObject(provider.token_params, connectionConfig)) {
-            const error = WSErrBuilder.InvalidConnectionConfig('token_params', JSON.stringify(connectionConfig));
-            void logCtx.error(error.message, { connectionConfig });
+            const connectionConfigSummary = sensitiveFields(connectionConfig);
+            const error = WSErrBuilder.InvalidConnectionConfig('token_params', JSON.stringify(connectionConfigSummary.fieldNames));
+            void logCtx.error(error.message, { connectionConfig: connectionConfigSummary });
             await logCtx.failed();
 
             await publisher.notifyErr(res, channel, providerConfigKey, connectionId, error);

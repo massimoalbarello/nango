@@ -159,10 +159,11 @@ describe('refreshMcpGenericCredentials', () => {
     });
 
     it('returns refresh_token_external_error when the token endpoint rejects the request', async () => {
+        const logCtx = mockLogCtx();
         vi.stubGlobal(
             'fetch',
             vi.fn().mockResolvedValue(
-                new Response(JSON.stringify({ error: 'invalid_request', error_description: 'client_secret: missing_required_field' }), {
+                new Response(JSON.stringify({ error: 'invalid_request', error_description: 'refresh-secret-must-not-persist' }), {
                     status: 400,
                     headers: { 'content-type': 'application/json' }
                 })
@@ -171,24 +172,28 @@ describe('refreshMcpGenericCredentials', () => {
 
         const result = await refreshMcpGenericCredentials({
             connection: mcpGenericConnection(),
-            logCtx: mockLogCtx()
+            logCtx
         });
 
         expect(result.success).toBe(false);
         expect(result.error?.type).toBe('refresh_token_external_error');
+        expect(JSON.stringify(result.error?.payload)).not.toContain('refresh-secret-must-not-persist');
+        expect(JSON.stringify(vi.mocked(logCtx.error).mock.calls)).not.toContain('refresh-secret-must-not-persist');
     });
 
     it('returns invalid_oauth_metadata when oauth_resource_url is malformed', async () => {
         const fetchMock = vi.fn();
+        const logCtx = mockLogCtx();
         vi.stubGlobal('fetch', fetchMock);
 
         const result = await refreshMcpGenericCredentials({
-            connection: mcpGenericConnection({ resourceUrl: 'not a url' }),
-            logCtx: mockLogCtx()
+            connection: mcpGenericConnection({ resourceUrl: 'not-a-url-with-resource-secret' }),
+            logCtx
         });
 
         expect(result.success).toBe(false);
         expect(result.error?.type).toBe('unhandled_invalid_oauth_metadata');
         expect(fetchMock).not.toHaveBeenCalled();
+        expect(JSON.stringify(vi.mocked(logCtx.error).mock.calls)).not.toContain('resource-secret');
     });
 });

@@ -23,13 +23,14 @@ import {
     pubsub,
     refreshOrTestCredentials
 } from '@nangohq/shared';
-import { getHeaders, getLogger, isBaseUrlOverrideDenied, metrics, normalizeDenylist, redactHeaders, zodErrorToHTTP } from '@nangohq/utils';
+import { getHeaders, getLogger, isBaseUrlOverrideDenied, metrics, normalizeDenylist, zodErrorToHTTP } from '@nangohq/utils';
 
 import { envs } from '../../env.js';
 import { connectionIdSchema, providerConfigKeySchema } from '../../helpers/validation.js';
 import { connectionRefreshFailed, connectionRefreshSuccess } from '../../hooks/hooks.js';
 import { asyncWrapper } from '../../utils/asyncWrapper.js';
 import { egressTelemetryRecorder } from '../../utils/egressTelemetry.js';
+import { errorName, headerNamesOnly, sensitiveFields, urlWithQueryParameterNames } from '../../utils/logging.js';
 import { capping } from '../../utils/usage.js';
 
 import type { ServerEgressCallsite } from '../../utils/egressTelemetry.js';
@@ -253,7 +254,7 @@ export const allPublicProxy = asyncWrapper<AllPublicProxy>(async (req, res, next
 
         const connectionRes = await connectionService.getConnection(connectionId, providerConfigKey, environment.id);
         if (connectionRes.error || !connectionRes.response) {
-            void logCtx.error('Failed to get connection', { error: connectionRes.error });
+            void logCtx.error('Failed to get connection', { causeType: errorName(connectionRes.error) });
             await logCtx.failed();
             res.status(400).send({
                 error: { code: 'server_error', message: `Failed to get connection` }
@@ -273,7 +274,7 @@ export const allPublicProxy = asyncWrapper<AllPublicProxy>(async (req, res, next
         });
         if (credentialResponse.isErr()) {
             const err = credentialResponse.error;
-            void logCtx.error('Failed to get connection credentials', { error: err });
+            void logCtx.error('Failed to get connection credentials', { errorType: err.type });
             await logCtx.failed();
             if (err.type === 'connection_refresh_backoff') {
                 res.status(err.status).send({ error: { code: err.type, message: err.message } });
@@ -444,32 +445,33 @@ export const allPublicProxy = asyncWrapper<AllPublicProxy>(async (req, res, next
             }
         });
     } catch (err) {
-        errorManager.report(err, {
+        errorManager.report(new Error('proxy_request_failed'), {
             source: ErrorSourceEnum.PLATFORM,
             operation: LogActionEnum.PROXY,
             environmentId: environment.id,
             metadata: {
                 connectionId,
-                providerConfigKey
+                providerConfigKey,
+                causeType: errorName(err)
             }
         });
         if (logCtx) {
-            void logCtx.error('uncaught error', { error: err });
+            void logCtx.error('uncaught error', { causeType: errorName(err) });
             await logCtx.failed();
         }
         metrics.increment(metrics.Types.PROXY_FAILURE);
-        next(err);
+        next(new Error('proxy_request_failed'));
     } finally {
         const reqHeaders = getHeaders(req.headers);
         await logCtx?.enrichOperation({
             request: {
-                url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+                url: urlWithQueryParameterNames(`${req.protocol}://${req.get('host')}${req.originalUrl}`),
                 method: req.method,
-                headers: redactHeaders({ headers: reqHeaders })
+                headers: headerNamesOnly(reqHeaders)
             },
             response: {
                 code: res.statusCode,
-                headers: redactHeaders({ headers: getHeaders(res.getHeaders()) })
+                headers: headerNamesOnly(getHeaders(res.getHeaders()))
             }
         });
     }
@@ -618,7 +620,7 @@ export async function handleResponse({
             res.send(Buffer.concat(responseData));
             onEgressedBytes?.(responseLen);
         } catch (err) {
-            void logCtx.error('Failed to write response', { error: err });
+            void logCtx.error('Failed to write response', { causeType: errorName(err) });
             await logCtx.failed();
             metrics.increment(metrics.Types.PROXY_FAILURE);
             return;
@@ -667,7 +669,7 @@ export function handleErrorResponse({
 
     const proxyErr = proxyErrorFromErrorChain(error);
     if (proxyErr?.code === 'proxy_redirect_to_denied_host') {
-        void logCtx.error('Proxy redirect denied by denylist', { error: proxyErr });
+        void logCtx.error('Proxy redirect denied by denylist', { errorCode: proxyErr.code });
         const body = {
             error: {
                 code: 'base_url_override_not_allowed',
@@ -681,7 +683,7 @@ export function handleErrorResponse({
 
     const outboundErr = findOutboundUrlError(error);
     if (outboundErr) {
-        void logCtx.error('Proxy outbound URL denied by policy', { error: outboundErr });
+        void logCtx.error('Proxy outbound URL denied by policy', { causeType: errorName(outboundErr) });
         const body = {
             error: {
                 code: 'base_url_override_not_allowed',
@@ -695,7 +697,7 @@ export function handleErrorResponse({
 
     if (!isAxiosError(error)) {
         if (error instanceof ProxyError) {
-            void logCtx.error('Unknown error', { error });
+            void logCtx.error('Unknown error', { errorCode: error.code, causeType: errorName(error) });
             const body = {
                 error: { code: error.code, message: error.message }
             };
@@ -704,7 +706,7 @@ export function handleErrorResponse({
             return;
         }
 
-        void logCtx.error('Unknown error', { error });
+        void logCtx.error('Unknown error', { causeType: errorName(error) });
         res.status(500).send();
         onEgressedBytes?.(0);
         return;
@@ -742,7 +744,7 @@ export function handleErrorResponse({
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
         });
         errorStream.on('error', (err) => {
-            void logCtx.error('Error reading upstream error stream', { error: err });
+            void logCtx.error('Error reading upstream error stream', { causeType: errorName(err) });
             res.status(500).send();
             onEgressedBytes?.(0);
         });
@@ -766,7 +768,7 @@ export function handleErrorResponse({
             if (!forwardAllResponseHeaders) {
                 delete (responseHeaders as Record<string, unknown>)['transfer-encoding'];
             }
-            void logCtx.error('Failed with this body', { body: parsedBody });
+            void logCtx.error('Upstream request failed', { responseBody: sensitiveFields(parsedBody) });
 
             res.status(responseStatus).set(responseHeaders).send(data);
             onEgressedBytes?.(buffer.length);

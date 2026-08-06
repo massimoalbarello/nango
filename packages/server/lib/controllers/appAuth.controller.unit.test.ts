@@ -117,6 +117,22 @@ describe('AppAuthController.connect', () => {
         mockUpsertConnection.mockResolvedValue([{ connection: { id: 1, connection_id: 'conn-1', provider_config_key: 'github-app' }, operation: 'creation' }]);
     });
 
+    it('renders a trusted local completion page for provider callbacks without state', async () => {
+        const req = {
+            query: { installation_id: 'install-1', setup_action: 'install' },
+            headers: { referer: 'https://attacker.example/redirect' },
+            get: vi.fn().mockReturnValue('https://attacker.example/redirect')
+        } as unknown as Request;
+        const res = { redirect: vi.fn(), status: vi.fn(), set: vi.fn(), send: vi.fn() } as unknown as Response;
+
+        await appAuthController.connect(req, res, vi.fn());
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        expect(res.send).toHaveBeenCalled();
+        expect(res.redirect).not.toHaveBeenCalled();
+        expect(mockFindById).not.toHaveBeenCalled();
+    });
+
     it('stores the connect session webhook URL override as webhook_url_override (not connection_config)', async () => {
         const req = {
             query: { installation_id: 'install-1', state: 'session-id' }

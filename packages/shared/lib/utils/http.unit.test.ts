@@ -54,7 +54,7 @@ describe('loggedFetch', () => {
                 level: 'info',
                 message: 'GET https://httpstatuses.maor.io/200',
                 request: { headers: {}, method: 'GET', url: 'https://httpstatuses.maor.io/200', body: undefined },
-                response: { code: 200, headers: {} },
+                response: { code: 200, headers: { 'content-type': '<redacted>' } },
                 source: 'internal',
                 type: 'http'
             }
@@ -91,10 +91,7 @@ describe('loggedFetch', () => {
                 level: 'error',
                 message: 'GET https://httpstatuses.maor.io/500',
                 request: { headers: {}, method: 'GET', url: 'https://httpstatuses.maor.io/500', body: undefined },
-                response: { code: 500, headers: {} },
-                meta: {
-                    body: { code: 500, description: 'Internal Server Error' }
-                },
+                response: { code: 500, headers: { 'content-type': '<redacted>' } },
                 source: 'internal',
                 type: 'http'
             }
@@ -125,16 +122,44 @@ describe('loggedFetch', () => {
                 message: 'GET https://doesnotexists.dev/500',
                 request: { headers: {}, method: 'GET', url: 'https://doesnotexists.dev/500', body: undefined },
                 response: undefined,
-                error: {
-                    message: 'getaddrinfo ENOTFOUND doesnotexists.dev',
-                    name: 'Error',
-                    payload: undefined,
-                    type: undefined
-                },
+                error: undefined,
+                meta: { causeType: 'Error' },
                 source: 'internal',
                 type: 'http'
             }
         ]);
+    });
+
+    it('never logs auth request bodies, response bodies, or URL query values', async () => {
+        vi.stubGlobal(
+            'fetch',
+            vi.fn().mockResolvedValue(
+                new Response(JSON.stringify({ access_token: 'response-secret-must-not-persist' }), {
+                    status: 400,
+                    headers: { 'content-type': 'application/json' }
+                })
+            )
+        );
+
+        const buffer = logContextGetter.getBuffer({ accountId: 1 });
+        await loggedFetch(
+            {
+                url: new URL('https://auth.example.com/token?client_assertion=query-secret-must-not-persist'),
+                method: 'POST',
+                body: 'client_assertion=body-secret-must-not-persist'
+            },
+            { logCtx: buffer, context: 'auth', valuesToFilter: [] }
+        );
+
+        const persisted = JSON.stringify((buffer.transport as BufferTransport).buffer);
+        expect(persisted).not.toContain('must-not-persist');
+        expect((buffer.transport as BufferTransport).buffer[0]).toEqual(
+            expect.objectContaining({
+                message: 'POST https://auth.example.com/token',
+                request: expect.objectContaining({ url: 'https://auth.example.com/token', body: undefined }),
+                response: expect.objectContaining({ code: 400 })
+            })
+        );
     });
 
     describe('redirect policy', () => {

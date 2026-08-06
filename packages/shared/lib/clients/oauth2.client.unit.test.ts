@@ -181,4 +181,40 @@ describe('OAuth2 token generation and refresh', () => {
             }
         );
     });
+
+    it('does not persist provider response bodies or token URL query values when refresh fails', async () => {
+        await withServer(
+            (_req, res) => {
+                res.writeHead(400, {
+                    'content-type': 'application/json',
+                    'set-cookie': 'provider-cookie-secret=must-not-persist'
+                });
+                res.end(JSON.stringify({ access_token: 'access-secret-must-not-persist', refresh_token: 'refresh-secret-must-not-persist' }));
+            },
+            async (baseUrl) => {
+                const provider = makeProvider({ token_url: `${baseUrl}/token?tenant=token-url-secret-must-not-persist` });
+                const connection = {
+                    id: 1,
+                    environment_id: 1,
+                    connection_config: {},
+                    credentials: {
+                        type: 'OAUTH2',
+                        access_token: 'stale-access-token',
+                        refresh_token: 'the-refresh-token',
+                        expires_at: new Date(Date.now() - 60_000)
+                    }
+                } as unknown as DBConnectionDecrypted;
+
+                const buffer = logContextGetter.getBuffer({ accountId: 1 });
+                const result = await getFreshOAuth2Credentials({ connection, config: makeConfig(), provider, logCtx: buffer });
+                const persisted = JSON.stringify((buffer.transport as unknown as { buffer: unknown[] }).buffer);
+
+                expect(result.success).toBe(false);
+                expect(result.error?.type).toBe('refresh_token_external_error');
+                expect(JSON.stringify(result.error?.payload)).not.toContain('must-not-persist');
+                expect(persisted).not.toContain('must-not-persist');
+                expect(persisted).not.toContain('token-url-secret');
+            }
+        );
+    });
 });
