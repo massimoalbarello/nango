@@ -2,6 +2,7 @@ import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMeta
 import { OAuthClientInformationSchema, OAuthMetadataSchema } from '@modelcontextprotocol/sdk/shared/auth.js';
 
 import { NangoError } from '../utils/error.js';
+import { errorName } from '../utils/logging.js';
 
 import type { ServiceResponse } from '../models/Generic.js';
 import type { OAuthClientInformation, OAuthMetadata, OAuthProtectedResourceMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
@@ -130,9 +131,11 @@ export async function discoverMcpMetadata(
                 try {
                     validateUrl(endpoint.url);
                 } catch (err) {
-                    const errorMsg = `Discovered ${endpoint.name} failed security validation: ${err instanceof Error ? err.message : String(err)}`;
-                    void logCtx.error(errorMsg, { endpoint: endpoint.name, url: endpoint.url });
-                    throw new Error(errorMsg);
+                    void logCtx.error('Discovered OAuth endpoint failed security validation', {
+                        endpoint: endpoint.name,
+                        causeType: errorName(err)
+                    });
+                    throw new Error('Discovered OAuth endpoint failed security validation');
                 }
             }
         }
@@ -142,16 +145,16 @@ export async function discoverMcpMetadata(
                 validateUrl(metadata.registration_endpoint);
             } catch (err) {
                 void logCtx.error('Discovered registration_endpoint failed security validation, ignoring it', {
-                    url: metadata.registration_endpoint,
-                    error: err instanceof Error ? err.message : String(err)
+                    causeType: errorName(err)
                 });
                 delete metadata.registration_endpoint;
             }
         }
 
         void logCtx.info('MCP metadata discovery successful', {
-            tokenEndpoint: metadata.token_endpoint,
-            authEndpoint: metadata.authorization_endpoint
+            hasTokenEndpoint: Boolean(metadata.token_endpoint),
+            hasAuthorizationEndpoint: Boolean(metadata.authorization_endpoint),
+            hasRegistrationEndpoint: Boolean(metadata.registration_endpoint)
         });
 
         const discoveredScopes = discoverScopes(resourceMetadata ?? undefined, metadata);
@@ -163,9 +166,8 @@ export async function discoverMcpMetadata(
             ...(discoveredScopes && { scopes: discoveredScopes })
         };
     } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        void logCtx.error('MCP metadata discovery failed', { error: errorMessage });
-        return { success: false, error: errorMessage };
+        void logCtx.error('MCP metadata discovery failed', { causeType: errorName(err) });
+        return { success: false, error: 'Failed to discover MCP OAuth metadata' };
     }
 }
 
@@ -205,10 +207,11 @@ export async function refreshMcpGenericCredentials({
         metadata = OAuthMetadataSchema.parse(JSON.parse(metadataStr));
         clientInformation = OAuthClientInformationSchema.parse(JSON.parse(clientInfoStr));
     } catch (err) {
-        void logCtx.error('Failed to parse/validate MCP_OAUTH2_GENERIC metadata', { error: String(err) });
+        const causeType = errorName(err);
+        void logCtx.error('Failed to parse/validate MCP_OAUTH2_GENERIC metadata', { causeType });
         return {
             success: false,
-            error: new NangoError('invalid_oauth_metadata', { error: String(err) }),
+            error: new NangoError('invalid_oauth_metadata', { causeType }),
             response: null
         };
     }
@@ -218,15 +221,14 @@ export async function refreshMcpGenericCredentials({
         try {
             validateUrl(metadata.token_endpoint);
         } catch (err) {
-            const errorMessage = err instanceof Error ? err.message : String(err);
             void logCtx.error('Stored token_endpoint failed security validation', {
-                error: errorMessage,
-                endpoint: metadata.token_endpoint
+                causeType: errorName(err),
+                hasTokenEndpoint: true
             });
             return {
                 success: false,
                 error: new NangoError('invalid_token_endpoint', {
-                    message: `Token endpoint security validation failed: ${errorMessage}`
+                    message: 'Token endpoint security validation failed'
                 }),
                 response: null
             };
@@ -248,10 +250,11 @@ export async function refreshMcpGenericCredentials({
         try {
             resource = new URL(resourceUrl);
         } catch (err) {
-            void logCtx.error('Failed to parse oauth_resource_url', { error: String(err), resourceUrl });
+            const causeType = errorName(err);
+            void logCtx.error('Failed to parse oauth_resource_url', { causeType, hasResourceUrl: true });
             return {
                 success: false,
-                error: new NangoError('invalid_oauth_metadata', { error: String(err) }),
+                error: new NangoError('invalid_oauth_metadata', { causeType }),
                 response: null
             };
         }
@@ -266,10 +269,9 @@ export async function refreshMcpGenericCredentials({
             ...(resource && { resource })
         });
     } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
         return {
             success: false,
-            error: new NangoError('refresh_token_external_error', { error: errorMessage }),
+            error: new NangoError('refresh_token_external_error', { causeType: errorName(err) }),
             response: null
         };
     }

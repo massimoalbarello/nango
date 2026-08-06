@@ -1,13 +1,12 @@
 import Boom from '@hapi/boom';
 import { AuthorizationCode } from 'simple-oauth2';
 
-import { redactHeaders } from '@nangohq/utils';
-
 import { LogActionEnum } from '../models/Telemetry.js';
 import connectionsManager from '../services/connection.service.js';
 import { assertSafeOAuthUrl, getOAuthSafeHttpAgents } from '../services/proxy/outbound-policy.js';
 import { NangoError } from '../utils/error.js';
 import errorManager, { ErrorSourceEnum } from '../utils/error.manager.js';
+import { errorName, headerNamesOnly, sensitiveFields, stripUrlQuery } from '../utils/logging.js';
 import { makeUrl } from '../utils/utils.js';
 
 import type { ServiceResponse } from '../models/Generic.js';
@@ -132,17 +131,19 @@ export async function getFreshOAuth2Credentials({
     let rawNewAccessToken: AccessToken;
     const createdAt = new Date();
     const url = `${simpleOAuth2ClientConfig.auth.tokenHost}${simpleOAuth2ClientConfig.auth.tokenPath}`;
+    const logUrl = stripUrlQuery(url);
 
     try {
         await assertSafeOAuthUrl(url);
     } catch (err) {
-        const nangoErr = new NangoError('refresh_token_external_error', { message: err instanceof Error ? err.message : 'Outbound URL blocked by policy' });
-        void logCtx.http(`POST ${url}`, {
+        const causeType = errorName(err);
+        const nangoErr = new NangoError('refresh_token_external_error', { causeType });
+        void logCtx.http(`POST ${logUrl}`, {
             level: 'error',
             createdAt,
-            request: { method: 'POST', url, headers: {} },
+            request: { method: 'POST', url: logUrl, headers: {} },
             response: undefined,
-            error: err
+            meta: { causeType }
         });
         errorManager.report(nangoErr.message, {
             environmentId: connection.environment_id,
@@ -158,12 +159,12 @@ export async function getFreshOAuth2Credentials({
 
     try {
         rawNewAccessToken = await oldAccessToken.refresh(additionalParams);
-        void logCtx.http(`POST ${url}`, {
+        void logCtx.http(`POST ${logUrl}`, {
             createdAt,
             request: {
                 method: 'POST',
-                url,
-                headers: redactHeaders({ headers: simpleOAuth2ClientConfig.http.headers, valuesToFilter: [config.oauth_client_secret] })
+                url: logUrl,
+                headers: headerNamesOnly(simpleOAuth2ClientConfig.http.headers)
             },
             response: { code: 200, headers: {} }
         });
@@ -174,30 +175,30 @@ export async function getFreshOAuth2Credentials({
             if ('data' in err && 'payload' in err.data) {
                 errorPayload = err.data.payload;
             }
-            const payload = {
-                dataMessage: errorPayload instanceof Buffer ? errorPayload.toString() : errorPayload
-            };
-            void logCtx.http(`POST ${url}`, {
+            const responseBody = sensitiveFields(errorPayload);
+            const payload = { statusCode: err.output.statusCode, causeType: errorName(err), responseBody };
+            void logCtx.http(`POST ${logUrl}`, {
                 level: 'error',
                 createdAt,
                 request: {
                     method: 'POST',
-                    url,
-                    headers: redactHeaders({ headers: simpleOAuth2ClientConfig.http.headers, valuesToFilter: [config.oauth_client_secret] })
+                    url: logUrl,
+                    headers: headerNamesOnly(simpleOAuth2ClientConfig.http.headers)
                 },
-                response: { code: err.output.statusCode, headers: err.output.headers as Record<string, any> },
-                meta: { body: errorPayload instanceof Buffer ? errorPayload.toString() : errorPayload }
+                response: { code: err.output.statusCode, headers: headerNamesOnly(err.output.headers) },
+                meta: { responseBody }
             });
             nangoErr = new NangoError(`refresh_token_external_error`, payload);
         } else {
-            void logCtx.http(`POST ${url}`, {
+            const causeType = errorName(err);
+            void logCtx.http(`POST ${logUrl}`, {
                 level: 'error',
                 createdAt,
-                request: { method: 'POST', url, headers: {} },
+                request: { method: 'POST', url: logUrl, headers: {} },
                 response: undefined,
-                error: err
+                meta: { causeType }
             });
-            nangoErr = new NangoError(`refresh_token_external_error`, { message: err instanceof Error ? err.message : 'unknown Error' });
+            nangoErr = new NangoError(`refresh_token_external_error`, { causeType });
         }
 
         errorManager.report(nangoErr.message, {

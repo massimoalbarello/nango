@@ -81,6 +81,76 @@ describe('call', () => {
         expect(fn).toHaveBeenCalledTimes(2);
     });
 
+    it('logs only proxy query parameter names on success', async () => {
+        const fn = vi.fn();
+        const proxy = new ProxyRequest({
+            logger: fn,
+            proxyConfig: getDefaultProxy({
+                provider: { proxy: { base_url: 'https://api.example.com', headers: { 'x-api-key': 'success-header-secret-must-not-persist' } } },
+                endpoint: '/records?cursor=success-secret-must-not-persist&filter=private-value'
+            }),
+            getConnection: () => getTestConnection(),
+            getIntegrationConfig: () => ({ oauth_client_id: null, oauth_client_secret: null })
+        });
+        vi.spyOn(proxy, 'httpCall').mockResolvedValue({
+            status: 200,
+            data: {},
+            headers: {},
+            config: {} as InternalAxiosRequestConfig,
+            statusText: 'OK'
+        });
+
+        await proxy.request();
+
+        const persisted = JSON.stringify(fn.mock.calls);
+        expect(persisted).not.toContain('success-secret-must-not-persist');
+        expect(persisted).not.toContain('success-header-secret-must-not-persist');
+        expect(persisted).not.toContain('private-value');
+        expect(fn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                message: 'GET https://api.example.com/records?cursor&filter',
+                request: expect.objectContaining({
+                    url: 'https://api.example.com/records?cursor&filter',
+                    headers: expect.objectContaining({ 'x-api-key': '<redacted>' })
+                })
+            })
+        );
+    });
+
+    it('logs only proxy query parameter names on Axios errors', async () => {
+        const fn = vi.fn();
+        const proxy = new ProxyRequest({
+            logger: fn,
+            proxyConfig: getDefaultProxy({
+                provider: { proxy: { base_url: 'https://api.example.com', headers: { 'x-api-key': 'error-header-secret-must-not-persist' } } },
+                endpoint: '/records?cursor=error-secret-must-not-persist&filter=private-value',
+                retries: 0
+            }),
+            getConnection: () => getTestConnection(),
+            getIntegrationConfig: () => ({ oauth_client_id: null, oauth_client_secret: null })
+        });
+        const error = makeAxiosError(400);
+        error.message = 'Request failed with error-secret-must-not-persist';
+        vi.spyOn(proxy, 'httpCall').mockRejectedValue(error);
+
+        await proxy.request();
+
+        const persisted = JSON.stringify(fn.mock.calls);
+        expect(persisted).not.toContain('error-secret-must-not-persist');
+        expect(persisted).not.toContain('error-header-secret-must-not-persist');
+        expect(persisted).not.toContain('private-value');
+        expect(fn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                message: 'GET https://api.example.com/records?cursor&filter',
+                request: expect.objectContaining({
+                    url: 'https://api.example.com/records?cursor&filter',
+                    headers: expect.objectContaining({ 'x-api-key': '<redacted>' })
+                }),
+                error: expect.objectContaining({ message: 'Proxy request failed' })
+            })
+        );
+    });
+
     it('should retries failed http call', { timeout: 10000 }, async () => {
         const fn = vi.fn();
         const getConnection = vi.fn(() => {

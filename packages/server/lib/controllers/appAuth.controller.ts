@@ -1,13 +1,15 @@
 import db from '@nangohq/database';
 import { logContextGetter } from '@nangohq/logs';
 import { accountService, configService, connectionService, errorManager, getProvider, githubAppClient, syncEndUserToConnection } from '@nangohq/shared';
-import { report, stringifyError } from '@nangohq/utils';
+import { report } from '@nangohq/utils';
 
 import publisher from '../clients/publisher.client.js';
 import { connectionCreated as connectionCreatedHook, connectionCreationFailed as connectionCreationFailedHook } from '../hooks/hooks.js';
 import { getConnectSession } from '../services/connectSession.service.js';
 import oAuthSessionService from '../services/oauth-session.service.js';
 import { resolveConnectionConfig, resolveOutboundWebhookUrlOverride } from '../utils/auth.js';
+import { authHtml } from '../utils/html.js';
+import { errorName, sensitiveFields } from '../utils/logging.js';
 import { missesInterpolationParam } from '../utils/utils.js';
 import * as WSErrBuilder from '../utils/web-socket-error.js';
 
@@ -24,7 +26,7 @@ class AppAuthController {
         // this is an instance where an organization approved an install
         // reconcile the installation id using the webhook
         if ((action === 'install' && !state) || (action === 'update' && !state)) {
-            res.redirect(req.get('referer') || req.get('Referer') || req.headers.referer || 'https://github.com');
+            authHtml({ res });
             return;
         }
 
@@ -100,7 +102,7 @@ class AppAuthController {
             if (action === 'request') {
                 void logCtx.error('App types do not support the request flow. Please use the github-app-oauth provider for the request flow.', {
                     provider: config.provider,
-                    url: req.originalUrl
+                    url: req.path
                 });
                 await logCtx.failed();
 
@@ -115,8 +117,9 @@ class AppAuthController {
             };
 
             if (missesInterpolationParam(tokenUrl, connectionConfig)) {
-                const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfig));
-                void logCtx.error(error.message, { connectionConfig, url: req.originalUrl });
+                const connectionConfigSummary = sensitiveFields(connectionConfig);
+                const error = WSErrBuilder.InvalidConnectionConfig(tokenUrl, JSON.stringify(connectionConfigSummary.fieldNames));
+                void logCtx.error(error.message, { connectionConfig: connectionConfigSummary, url: req.path });
                 await logCtx.failed();
 
                 await publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, error);
@@ -131,10 +134,10 @@ class AppAuthController {
 
             const credentialsRes = await githubAppClient.createCredentials({ provider: provider as ProviderGithubApp, integration: config, connectionConfig });
             if (credentialsRes.isErr()) {
-                report(credentialsRes.error);
-                void logCtx.error('Error during Github App credentials creation', { error: credentialsRes.error });
+                report(new Error('github_app_credentials_creation_failed'));
+                void logCtx.error('Error during Github App credentials creation', { causeType: errorName(credentialsRes.error) });
                 await logCtx.failed();
-                await publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, credentialsRes.error);
+                await publisher.notifyErr(res, wsClientId, providerConfigKey, connectionId, WSErrBuilder.UnknownError());
                 return;
             }
 
@@ -218,12 +221,9 @@ class AppAuthController {
             });
             return;
         } catch (err) {
-            const prettyError = stringifyError(err, { pretty: true });
-
             const error = WSErrBuilder.UnknownError();
-            const content = error.message + '\n' + prettyError;
 
-            void logCtx.error(error.message, { error: err, url: req.originalUrl });
+            void logCtx.error(error.message, { causeType: errorName(err), url: req.path });
             await logCtx.failed();
 
             void connectionCreationFailedHook(
@@ -238,14 +238,14 @@ class AppAuthController {
                     auth_mode: 'APP',
                     error: {
                         type: 'unknown',
-                        description: content
+                        description: error.message
                     },
                     operation: 'unknown'
                 },
                 account
             );
 
-            return publisher.notifyErr(res, wsClientId, providerConfigKey, receivedConnectionId, WSErrBuilder.UnknownError(prettyError));
+            return publisher.notifyErr(res, wsClientId, providerConfigKey, receivedConnectionId, WSErrBuilder.UnknownError());
         }
     }
 }

@@ -76,8 +76,8 @@ class RedisPublisher {
         try {
             await this.redis.publish(channel, message);
             return true;
-        } catch (err) {
-            logger.error(`Error publishing message '${message}' to channel '${channel}'`, err);
+        } catch {
+            logger.error('Error publishing OAuth result through Redis');
             return false;
         }
     }
@@ -89,8 +89,8 @@ class RedisPublisher {
                 const wsClientId = channel.replace(RedisPublisher.REDIS_CHANNEL_PREFIX, '');
                 onMessage(message, wsClientId);
             });
-        } catch (err) {
-            logger.error(`Error subscribing to redis channel "${channel}"`, err);
+        } catch {
+            logger.error('Error subscribing to OAuth result channel in Redis');
         }
     }
 
@@ -98,8 +98,8 @@ class RedisPublisher {
         const channel = RedisPublisher.REDIS_CHANNEL_PREFIX + wsClientId;
         try {
             await this.redis.unsubscribe(channel);
-        } catch (err) {
-            logger.error(`Error unsubscribing from redis channel "${channel}"`, err);
+        } catch {
+            logger.error('Error unsubscribing from OAuth result channel in Redis');
         }
     }
 }
@@ -188,7 +188,7 @@ export class Publisher {
         connectionId: string | undefined,
         wsErr: WSErr
     ) {
-        logger.debug(`OAuth flow error for provider config "${providerConfigKey}" and connectionId "${connectionId}": ${wsErr.type} - ${wsErr.message}`);
+        logger.debug(`OAuth flow error for provider config "${providerConfigKey}" and connectionId "${connectionId}": ${wsErr.type}`);
         if (wsClientId) {
             const data = JSON.stringify({
                 message_type: 'error',

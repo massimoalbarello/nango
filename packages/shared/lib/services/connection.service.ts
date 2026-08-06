@@ -5,7 +5,7 @@ import ms from 'ms';
 import { v4 as uuidv4 } from 'uuid';
 
 import db, { dbNamespace } from '@nangohq/database';
-import { axiosInstance as axios, Err, getLogger, Ok, stringifyError } from '@nangohq/utils';
+import { axiosInstance as axios, Err, getLogger, Ok } from '@nangohq/utils';
 
 import * as appleAppStoreClient from '../auth/appleAppStore.js';
 import * as assertionClient from '../auth/assertion.js';
@@ -20,6 +20,7 @@ import providerClient from '../clients/provider.client.js';
 import { getEncryptionManager } from '../utils/encryption.manager.js';
 import { NangoError } from '../utils/error.js';
 import { loggedFetch } from '../utils/http.js';
+import { errorName, sensitiveFields } from '../utils/logging.js';
 import {
     extractStepNumber,
     extractValueByPath,
@@ -1323,12 +1324,15 @@ class ConnectionService {
         } catch (err) {
             const outboundErr = findOutboundUrlError(err);
             const reasonCode = outboundErr?.code ?? 'blocked';
-            const errorMessage = outboundErr?.message ?? (err instanceof Error ? err.message : String(err));
             logger.error(`OAuth client credentials token URL blocked by outbound policy (host: ${url.host}, code: ${reasonCode})`);
-            void logCtx.error('Token URL blocked by outbound policy', { host: url.host, code: reasonCode, error: errorMessage });
+            void logCtx.error('Token URL blocked by outbound policy', { host: url.host, code: reasonCode, causeType: errorName(err) });
             return {
                 success: false,
-                error: new NangoError('client_credentials_fetch_error', { host: url.host, code: reasonCode, message: errorMessage }),
+                error: new NangoError('client_credentials_fetch_error', {
+                    host: url.host,
+                    code: reasonCode,
+                    message: 'Token URL blocked by outbound policy'
+                }),
                 response: null
             };
         }
@@ -1457,7 +1461,9 @@ class ConnectionService {
             { logCtx, context: 'auth', valuesToFilter: [client_secret, client_private_key].filter(Boolean) as string[] }
         );
         if (fetchRes.isErr() || fetchRes.value.res.status >= 300) {
-            const errorPayload = fetchRes.isOk() ? stringifyError({ response: { data: fetchRes.value.body } }) : stringifyError(fetchRes.error);
+            const errorPayload = fetchRes.isOk()
+                ? { statusCode: fetchRes.value.res.status, responseBody: sensitiveFields(fetchRes.value.body) }
+                : { causeType: errorName(fetchRes.error) };
             const error = new NangoError('client_credentials_fetch_error', errorPayload);
             return { success: false, error, response: null };
         }
@@ -1736,9 +1742,9 @@ class ConnectionService {
 
             return { success: true, error: null, response: parsedCreds };
         } catch (err: any) {
-            const errorPayload = stringifyError(err);
-            logger.error(`Error fetching TwoStep credentials tokens ${errorPayload}`);
-            const error = new NangoError('two_step_credentials_fetch_error', errorPayload);
+            const causeType = errorName(err);
+            logger.error(`Error fetching TwoStep credentials tokens (cause: ${causeType})`);
+            const error = new NangoError('two_step_credentials_fetch_error', { causeType });
 
             return { success: false, error, response: null };
         }
